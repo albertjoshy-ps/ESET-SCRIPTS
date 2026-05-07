@@ -8,26 +8,42 @@ if (!(Test-Path $logPath)) {
 
 function Log {
     param ($msg)
-    Add-Content -Path $logFile -Value "$(Get-Date) - $msg"
+    Add-Content -Path $logFile -Value "$(Get-Date -Format 'MM/dd/yyyy HH:mm:ss') - $msg"
 }
 
 $hostname = $env:COMPUTERNAME
 Log "===== [$hostname] Firefox Update Check Start ====="
 
-# Detect Firefox path
+# Detect Firefox installation
 $paths = @(
     "$env:ProgramFiles\Mozilla Firefox\firefox.exe",
-    "$env:ProgramFiles(x86)\Mozilla Firefox\firefox.exe",
+    "${env:ProgramFiles(x86)}\Mozilla Firefox\firefox.exe",
     "$env:LOCALAPPDATA\Mozilla Firefox\firefox.exe"
 )
 
+# First check standard locations
 $ffPath = $paths | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+# Check all user profiles if not found
+if (!$ffPath) {
+    $ffPath = Get-ChildItem "C:\Users\*\AppData\Local\Mozilla Firefox\firefox.exe" -ErrorAction SilentlyContinue |
+    Select-Object -First 1 -ExpandProperty FullName
+}
 
 if ($ffPath) {
 
-    $installed = (Get-Item $ffPath).VersionInfo.ProductVersion
-    Log "Installed Version: $installed"
+    Log "Firefox found at: $ffPath"
 
+    try {
+        $installed = (Get-Item $ffPath).VersionInfo.ProductVersion
+        Log "Installed Version: $installed"
+    }
+    catch {
+        Log "ERROR: Unable to read installed version"
+        exit 1
+    }
+
+    # Get latest Firefox version
     try {
         $json = Invoke-WebRequest "https://product-details.mozilla.org/1.0/firefox_versions.json" -UseBasicParsing | ConvertFrom-Json
         $latest = $json.LATEST_FIREFOX_VERSION
@@ -38,42 +54,66 @@ if ($ffPath) {
         exit 2
     }
 
-    if ($installed -eq $latest) {
-        Log "STATUS: UP-TO-DATE"
-        exit 0
+    # Compare versions
+    try {
+        if ([version]$installed -ge [version]$latest) {
+            Log "STATUS: UP-TO-DATE"
+            exit 0
+        }
     }
-    else {
-        Log "STATUS: UPDATE AVAILABLE - Triggering update"
+    catch {
+        Log "WARNING: Version comparison failed, continuing update"
+    }
 
-        # Stop Firefox
-        Stop-Process -Name firefox -Force -ErrorAction SilentlyContinue
-        Log "Firefox stopped"
+    Log "STATUS: UPDATE AVAILABLE - Triggering update"
 
-        # Trigger update
-        Start-Process $ffPath -ArgumentList "-silent" -WindowStyle Hidden
-        Log "Update triggered"
+    # Stop Firefox
+    Stop-Process -Name firefox -Force -ErrorAction SilentlyContinue
+    Log "Firefox stopped"
+
+    # Find updater.exe
+    $ffFolder = Split-Path $ffPath
+    $updater = Join-Path $ffFolder "updater.exe"
+
+    if (Test-Path $updater) {
+
+        try {
+            Start-Process $updater -ArgumentList "/S" -Wait -WindowStyle Hidden
+            Log "Updater executed"
+        }
+        catch {
+            Log "ERROR: Failed to execute updater"
+            exit 1
+        }
 
         Start-Sleep -Seconds 60
 
-        # Restart Firefox
-        Stop-Process -Name firefox -Force -ErrorAction SilentlyContinue
-        Start-Process $ffPath -WindowStyle Hidden
-        Log "Firefox restarted"
+        # Verify updated version
+        try {
+            $updated = (Get-Item $ffPath).VersionInfo.ProductVersion
+            Log "After Version: $updated"
 
-        Start-Sleep -Seconds 5
-
-        # Check version again
-        $updated = (Get-Item $ffPath).VersionInfo.ProductVersion
-        Log "After Version: $updated"
-
-        if ($updated -ne $installed) {
-            Log "STATUS: UPDATED SUCCESSFULLY"
-            exit 0
+            if ([version]$updated -gt [version]$installed) {
+                Log "STATUS: UPDATED SUCCESSFULLY"
+                exit 0
+            }
+            elseif ([version]$updated -ge [version]$latest) {
+                Log "STATUS: UPDATED TO LATEST"
+                exit 0
+            }
+            else {
+                Log "STATUS: UPDATE FAILED OR BLOCKED"
+                exit 1
+            }
         }
-        else {
-            Log "STATUS: UPDATE FAILED OR BLOCKED"
+        catch {
+            Log "ERROR: Unable to verify updated version"
             exit 1
         }
+    }
+    else {
+        Log "ERROR: updater.exe not found"
+        exit 1
     }
 }
 else {
